@@ -1,106 +1,94 @@
-# Local SAT Solver
+# mdcheck — 本地 Markdown 文档一致性检查工具
 
-一个完全本地运行的 SAT 求解器，仅依赖 Python 标准库。核心 DPLL 算法
-自行实现，不调用 Z3、MiniSat 或任何云求解服务；所有 CNF 输入、求解
-状态、模型与测试数据只存在于本地文件或内存中。
-
-## 文件结构
-
-- `sat_solver.py` — DIMACS 解析器、DPLL 求解器、模型验证与 CLI
-- `tests/test_sat_solver.py` — 单元测试（含穷举 oracle 对照）
-
-## DIMACS CNF 输入格式
-
-```
-c 注释行以 c 开头
-p cnf <nvars> <nclauses>
-1 -2 0
-2 3 0
-%
-```
-
-严格校验规则（违反即抛出 `DimacsError`）：
-
-- 必须有且仅有一行 `p cnf <nvars> <nclauses>` 头，且出现在任何子句之前
-- 每个文字是 `[−nvars, nvars]` 内的非零整数；子句以 `0` 结束，可跨行
-- 实际子句数必须与头部声明完全一致
-- 最后一个子句必须以 `0` 结束（文件结束标记校验）
-- 可选的 `%` 结束标记之后只允许注释行，不允许再出现子句内容
-
-### 确定语义
-
-| 输入 | 语义 |
-| --- | --- |
-| 空公式（0 个子句） | SAT，模型可任意扩展（未受约束变量默认赋 True） |
-| 空子句 | 公式 UNSAT |
-| 重复文字 | 去重 |
-| 重言式子句（同时含 `x` 与 `-x`） | 恒真，直接丢弃 |
-
-## DPLL 流程
-
-`DPLLSolver._dpll` 的每一层递归依次执行：
-
-1. **Unit propagation（单元传播）**：反复找到长度为 1 的子句，强制赋值
-   并化简公式，直到不动点；出现空子句即冲突，触发回溯。
-2. **Pure literal elimination（纯文字消除）**：在剩余子句中只以单一极性
-   出现的变量直接赋为满足值，循环至不再存在纯文字。
-3. **变量选择（分支启发式）**：在未赋值变量中挑选在剩余子句中出现次数
-   最多的变量（出现次数相同则取编号较小者），先尝试 `True` 再尝试
-   `False`。
-4. **回溯**：某一分支失败时撤销该分支引入的所有赋值，尝试另一极性；
-   两极性都失败则向上一层报告冲突。UNSAT 结论由搜索空间穷尽得出，
-   不依赖任何超时猜测。
-
-### 统计输出
-
-求解过程累计三项指标（`SolverStats`）：
-
-- `propagations` — 强制赋值次数（unit propagation + pure literal）
-- `decisions` — 分支决策次数
-- `backtracks` — 失败分支回退次数
+`mdcheck` 递归扫描工程内的 Markdown 文件，校验内部链接、heading anchor
+与图片引用是否与磁盘上的真实文件一致。**所有输入（Markdown、索引、配置、
+报告）均来自本地工程，工具不访问 GitHub、网页、搜索引擎或任何外部服务。**
 
 ## 使用方法
 
 ```bash
-python3 sat_solver.py path/to/formula.cnf
+python -m mdcheck [根目录] [--config 配置文件] [--format text|json]
 ```
 
-输出示例：
+- 根目录默认为当前目录。
+- 配置文件默认为 `<根目录>/mdcheck.toml`，不存在时使用内置默认配置。
+- `--format` 默认为 `text`（终端文本），可选 `json`。
 
+### 退出码
+
+| 退出码 | 含义 |
+| ------ | ---- |
+| 0 | 未发现问题 |
+| 1 | 发现问题（错误或警告） |
+| 2 | 工具自身错误（配置错误、文件不可读、根目录不存在等） |
+
+## Anchor 生成规则
+
+anchor 由 heading 纯文本（去除行内 Markdown 标记与 HTML 标签后）按
+GitHub 风格的稳定规则生成：
+
+1. 去除首尾空白，全部转小写（Unicode aware）。
+2. 删除标点与符号；保留 Unicode 字母、数字、`-`、`_` 及组合记号。
+3. 空白字符（空格、Tab 等）替换为 `-`。
+4. 同一文档内重复 heading 依次追加 `-1`、`-2` 后缀，保证唯一且稳定。
+
+示例：
+
+| Heading | Anchor |
+| ------- | ------ |
+| `## 安装步骤` | `#安装步骤` |
+| `## Café au lait` | `#café-au-lait` |
+| `## 你好，世界` | `#你好世界`（逗号被删除） |
+| 第二个 `## 重复` | `#重复-1` |
+
+链接中的 anchor 与生成结果精确匹配（区分大小写，生成结果均为小写）。
+
+## 检查范围
+
+- 递归扫描 `.md` / `.markdown` 文件（忽略规则见下文）。
+- 解析 ATX（`#`）与 Setext（`===` / `---`）heading。
+- 校验行内链接 `[text](dest)` 与图片 `![alt](src)`：
+  - 相对文件链接是否真实存在（含子目录、`..` 与百分号编码路径）。
+  - 文件内与跨文件的 `#anchor` 是否存在；heading 被修改或文件被
+    重命名后，对应的失效引用会被报告为 `missing-anchor` /
+    `missing-file`，并给出来源文件与准确行号。
+- 重复 heading 生成的 anchor 冲突报告为 `duplicate-anchor` 警告。
+- 围栏代码块（```` ``` ```` 与 `~~~`）和行内代码中的伪链接一律忽略。
+- 外部链接（`http(s)://`、`mailto:`、`//...` 等带 scheme 的目标）跳过。
+- 非 Markdown 目标（如图片）只校验文件存在，不校验 anchor。
+
+暂不校验引用式链接（`[text][ref]`）与 HTML 标签内的链接。
+
+## 配置（mdcheck.toml）
+
+```toml
+# 额外忽略的目录名（默认已含 .git/.hg/.svn/node_modules/__pycache__）
+ignore_dirs = ["vendor", "dist"]
+
+# fnmatch 风格的忽略规则，匹配相对根目录的路径（含任意父级命中即忽略）
+ignore = ["drafts/**", "*.tmp.md"]
+
+# 单文件最大字节数，超过则跳过并报告 file-skipped 警告
+max_file_size = 1048576
 ```
-SAT
-1 2 -3
-stats: propagations=3 decisions=0 backtracks=0
-```
 
-SAT 时退出码为 0 并打印完整模型（每个变量都有赋值，可直接用
-`verify_model` 复核所有子句）；UNSAT 时退出码为 1。
+配置错误（TOML 无法解析、未知键、类型错误、显式指定的配置文件不存在）
+会在 stderr 给出明确信息并以退出码 2 结束。
 
-作为库调用：
+## 输出
 
-```python
-from sat_solver import parse_dimacs, DPLLSolver, verify_model
+文本输出每条问题一行：`<文件>:<行号>: <级别>: <说明> [<类型>]`，末尾附汇总。
+JSON 输出包含 `files_scanned`、`error_count`、`warning_count` 与 `issues`
+数组（含 `file`、`line`、`severity`、`type`、`message`、`target` 字段）。
 
-formula = parse_dimacs(open("f.cnf").read())
-result = DPLLSolver(formula.num_vars, formula.clauses).solve()
-if result.satisfiable:
-    assert verify_model(formula.clauses, result.model)
-```
+## 测试
 
-## 运行测试
-
-所有测试直接在终端执行：
+全部测试在终端内运行，不启动文档网站或浏览器：
 
 ```bash
-python3 -m unittest discover -s tests -v
+python -m pytest tests/ -v
 ```
 
-测试覆盖：
-
-- SAT / UNSAT 基本用例与模型完整性
-- unit propagation 链与 pure literal elimination（无需决策即求解）
-- 鸽巢原理（4 鸽 3 洞）触发的深度回溯，断言 `backtracks > 0`
-- DIMACS 各类格式错误（缺头部、越界文字、子句未终止、子句数不符、
-  `%` 之后出现内容等）
-- 空公式 / 空子句 / 重复文字 / 重言式子句的确定语义
-- 300 组随机小公式，与穷举全部赋值的 oracle 逐一比对结果
+覆盖场景：合法链接、失效文件、失效 anchor（含跨文件与 heading 重命名）、
+Unicode heading、重复标题、代码块中的伪链接、忽略规则、配置错误、
+最大文件大小、图片引用与 JSON 输出格式。
