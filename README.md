@@ -1,86 +1,112 @@
-# Local DPLL SAT Solver
+# mdcheck — 本地 Markdown 文档一致性检查工具
 
-一个完全本地运行的 SAT 求解器：所有 CNF 输入、求解状态、模型与测试数据
-只保存在本地文件或内存中，不调用 Z3、MiniSat、云求解服务或任何外部服务。
-仅使用 Python 标准库，核心 DPLL 算法在 `sat_solver.py` 中自行实现。
+`mdcheck` 递归扫描本地工程中的 Markdown 文件，检查相对文件链接、heading
+anchor、图片引用和重复标题，帮助在文件重命名或标题修改后发现失效引用。
 
-## 文件结构
-
-- `sat_solver.py` — DIMACS 解析器、DPLL 求解器、模型验证器与 CLI。
-- `tests/test_sat_solver.py` — 自动化测试（unittest）。
-
-## DIMACS CNF 输入格式
-
-```
-c 注释行以 c 开头
-p cnf <nvars> <nclauses>
-1 -2 0
-2 3 0
-%
-```
-
-严格校验规则（违反即抛出 `DimacsError`，CLI 以退出码 1 报错）：
-
-- 必须有且仅有一行 `p cnf <nvars> <nclauses>` 头部，且位于所有 clause 之前；
-- 每个 literal 为整数，绝对值必须在 `1..nvars` 范围内；
-- 每个 clause 必须以 `0` 结束（允许跨行书写），文件结束时不得有未闭合的 clause；
-- 实际 clause 数量必须与头部声明完全一致；
-- 可选的 `%` 作为文件结束标记，其后只允许空白；
-- 非整数 token、重复头部、头部前出现 clause 均为错误。
-
-### 确定语义
-
-- **空公式**（0 个 clause）：恒为 SAT，返回全 False 的完整模型；
-- **空 clause**：使公式恒为 UNSAT；
-- **重复 literal**：在解析时折叠（clause 以 frozenset 存储）；
-- **tautology clause**（同时含 `x` 与 `-x`）：恒真，解析时直接丢弃。
-
-## DPLL 流程
-
-`DPLLSolver.solve()` 返回 `(sat, model)`。递归搜索的每一层按以下顺序进行：
-
-1. **冲突检测**：存在空 clause 则返回冲突，触发回溯；
-2. **Unit propagation**：反复取长度为 1 的 clause，强制其唯一 literal 为真并化简公式；
-3. **Pure literal elimination**：若某变量在剩余 clause 中只以一种极性出现，
-   直接按该极性赋值并化简；
-4. **决策（decision）**：选择分支变量，先尝试 `True` 再尝试 `False`，
-   某个分支失败则回溯尝试另一分支。
-
-### 变量选择启发式
-
-采用按 clause 长度加权的出现频率启发式（类似 DLIS）：变量在每个剩余
-clause 中贡献 `1/len(clause)` 的分数，选择总分最高的变量。短 clause 对
-搜索约束更强，因此其中的变量权重更大。
-
-### 模型
-
-SAT 时返回的模型覆盖 `1..nvars` 的全部变量（完整赋值）：搜索未约束到的
-变量统一补 `False`，因此模型可直接用于 `verify_model()` 逐 clause 验证。
-UNSAT 由搜索空间穷尽确定，不依赖任何超时猜测。
-
-### 统计
-
-`Stats` 记录并输出四项指标：
-
-- `propagations` — unit propagation 强制赋值的次数；
-- `pure_literals` — pure literal elimination 赋值的次数；
-- `decisions` — 分支尝试次数；
-- `backtracks` — 分支失败回溯的次数。
+**完全离线**：工具只读取本地文件系统，不访问 GitHub、网页、搜索引擎或任何
+外部服务；仅依赖 Python 标准库（Python ≥ 3.9）。
 
 ## 使用方法
 
 ```bash
-python3 -m sat_solver <file.cnf>
+python -m mdcheck [目录] [--format text|json] [--config 配置文件]
 ```
 
-输出解析结果、SAT/UNSAT、完整模型（SAT 时）与搜索统计。
+也可以安装为命令（`pip install .` 后使用 `mdcheck`）。
 
-## 运行测试
+### 退出码
+
+| 退出码 | 含义 |
+| ------ | ---- |
+| `0` | 未发现任何问题 |
+| `1` | 发现一致性问题（失效链接、失效 anchor、重复标题等） |
+| `2` | 工具自身错误（配置错误、目录不存在、文件读取失败等） |
+
+### 输出格式
+
+- `--format text`（默认）：终端文本，每条问题一行，格式为
+  `文件:行号: 类型: 描述`，末尾附统计摘要。
+- `--format json`：结构化 JSON，包含 `summary`、`skipped` 和 `issues`
+  三个部分，每个 issue 带 `type`、`file`、`line`、`message`、`target` 字段。
+
+## 检查范围
+
+- 递归扫描 `*.md` / `*.markdown` 文件，解析 ATX（`# 标题`）和 Setext
+  （`===` / `---`）heading。
+- 检查行内链接 `[text](dest)`、图片 `![alt](dest)` 和链接引用定义
+  `[id]: dest`。
+- 支持跨文件引用：`[x](docs/api.md#函数)` 会解析到目标文件并校验 anchor。
+- 支持百分号编码路径（如 `sub%20dir/my%20file.md`）。
+- 围栏代码块（```` ``` ```` 和 `~~~`）与行内代码中的伪链接、伪标题一律忽略。
+- 外部链接（`http:`、`https:`、`mailto:` 等带 scheme 的目标）直接跳过。
+- 非 Markdown 文件上的 `#anchor` 引用报告为 `invalid-anchor`。
+- 每个问题都报告来源文件与准确行号。
+
+### 问题类型
+
+| 类型 | 含义 |
+| ---- | ---- |
+| `missing-file` | 相对文件链接目标不存在 |
+| `missing-image` | 图片引用目标不存在 |
+| `missing-anchor` | 目标文件中不存在该 heading anchor（附相似 anchor 建议） |
+| `invalid-anchor` | 在非 Markdown 文件上使用了 `#anchor` |
+| `duplicate-heading` | 同一文件中重复标题导致 anchor 歧义 |
+| `read-error` | 文件无法读取或不是合法 UTF-8 |
+
+## Anchor 生成规则
+
+采用与 GitHub（github-slugger）一致的稳定规则，Unicode 感知：
+
+1. 取标题纯文本（去除行内代码、强调、链接等格式标记）。
+2. 转小写（Unicode 感知，如 `Über` → `über`）。
+3. 保留字母、数字、`-` 和 `_`，删除其余标点与符号（含 emoji）。
+4. 空白字符替换为 `-`。
+5. 同一文件中重复的标题按出现顺序追加 `-1`、`-2`……后缀，保证无关标题
+   变动时已有 anchor 保持稳定。
+
+示例：
+
+| 标题 | Anchor |
+| ---- | ------ |
+| `## Hello World` | `hello-world` |
+| `## 你好 世界` | `你好-世界` |
+| `## Foo, Bar & Baz!` | `foo-bar--baz` |
+| 第二个 `## Intro` | `intro-1` |
+
+重复标题会报告 `duplicate-heading` 问题：此时 `#intro` 指向第一个标题，
+存在歧义，建议修改标题或显式链接到 `#intro-1`。
+
+## 配置
+
+默认读取扫描根目录下的 `.mdcheck.json`（或 `mdcheck.json`），也可用
+`--config` 指定其他路径。所有配置项可选：
+
+```json
+{
+  "ignore_dirs": [".git", "node_modules"],
+  "ignore": ["drafts/*", "*.todo.md"],
+  "max_file_size": 1048576
+}
+```
+
+- `ignore_dirs`：目录名列表，扫描时整体跳过（任意层级均生效）。
+- `ignore`：glob 模式列表，对工程相对路径或文件名匹配（fnmatch 语义，
+  `*` 可跨目录分隔符）。
+- `max_file_size`：单文件最大字节数，超过则跳过并在报告中列出。
+
+配置错误（文件不存在、JSON 非法、未知键、类型错误、`max_file_size`
+非正整数等）会在 stderr 输出明确原因并以退出码 `2` 结束。
+
+被跳过的文件不会参与 anchor 校验：指向它们的文件链接仍检查存在性，
+但其内部 anchor 无法验证时不会误报。
+
+## 测试
+
+全部测试在终端执行，不启动文档网站或浏览器：
 
 ```bash
-python3 -m unittest discover -s tests
+python -m pytest
 ```
 
-测试覆盖：SAT/UNSAT 实例、unit propagation 链、pure literal elimination、
-深度回溯（4 鸽 3 洞鸽笼原理）、DIMACS 各类解析错误、空公式/空 clause/
-重复 literal/tautology 语义，以及 300 组随机小公式与穷举 oracle 的对拍验证。
+覆盖：合法链接、失效文件、失效 anchor、Unicode 标题、重复标题、代码块中
+的伪链接、忽略规则、配置错误、JSON/文本输出与退出码。

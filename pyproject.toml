@@ -1,0 +1,11 @@
+[project]
+name = "mdcheck"
+version = "0.1.0"
+description = "Local, offline Markdown documentation consistency checker"
+requires-python = ">=3.9"
+
+[project.scripts]
+mdcheck = "mdcheck.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
